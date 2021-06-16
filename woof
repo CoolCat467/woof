@@ -29,12 +29,17 @@ File upload support loosely based on code from Stephen English
 
 http://www.home.unix-ag.org/simon/woof.html"""
 
-import sys, os, errno, socket, getopt, subprocess, tempfile
-import cgi, urllib.request, urllib.parse, http.server
+import os, socket, getopt
+from tempfile import mkstemp
+from errno import EEXIST
+import cgi
+from urllib.parse import quote, unquote, urlparse 
+from urllib.request import urlopen
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import readline
-import configparser
-import shutil, tarfile, zipfile
-import struct
+from configparser import ConfigParser
+from shutil import copyfileobj
+import tarfile, zipfile
 
 maxdownloads = 1
 cpid = -1
@@ -69,12 +74,21 @@ def find_ip():
 # since we do our fork() in the request handler
 # the server must not shutdown() the socket.
 
-class ForkingHTTPServer(http.server.HTTPServer):
+class ForkingHTTPServer(HTTPServer):
     """Fix a change from Python 2.7 involving shutting down the socket after a fork."""
     def process_request(self, request, client_address):
+        """Finnish request and then close request. Don't shut down socket."""
         self.finish_request(request, client_address)
         self.close_request(request)
     pass
+
+def suffixGen():
+    """Generator object that returns filename suffixes"""
+    yield ''
+    i = 1
+    while True:
+        yield '.'+str(i)
+        i += 1
 
 def get_archive_ext(compressed:str, default:str='.tar'):
     """Return the archive extention for a file based on it's compression type."""
@@ -93,7 +107,7 @@ def get_archive_ext(compressed:str, default:str='.tar'):
 # Currently it is impossible to serve different files with different
 # instances of this class.
 
-class FileServHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
+class FileServHTTPRequestHandler(BaseHTTPRequestHandler):
     """Simons FileServer using HTTP/1.0 protocol"""
     server_version = 'Simons FileServer'
     protocol_version = 'HTTP/1.0'
@@ -103,7 +117,7 @@ class FileServHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
     def log_request(self, code='-', size='-'):
         """Log a request sent to the server"""
         if code == 200:
-            http.server.BaseHTTPRequestHandler.log_request(self, code, size)
+            super().log_request(code, size)
         return
     
     def do_POST(self):
@@ -141,26 +155,25 @@ class FileServHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
         upfilename = os.path.basename(upfile.filename)
         
         destfile = None
-        for suffix in ('', '.1', '.2', '.3', '.4', '.5', '.6', '.7', '.8', '.9'):
+        for suffix in suffixGen():
             destfilename = os.path.join('.', upfilename + suffix)
             try:
                 destfile = os.open(destfilename,
                                    os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
                 break
             except OSError as e:
-                if e.errno == errno.EEXIST:
+                if e.errno == EEXIST:
                     continue
                 raise
         
         if not destfile:
             upfilename += '.'
-            destfile, destfilename = tempfile.mkstemp(prefix=upfilename,
-                                                      dir='.')
+            destfile, destfilename = mkstemp(prefix=upfilename, dir='.')
         
         print(f'Accepting uploaded file: {upfilename} -> {destfilename}',
-              file=sys.stderr)
+              file=os.sys.stderr)
         
-        shutil.copyfileobj(upfile.file, os.fdopen(destfile, 'wb'))
+        copyfileobj(upfile.file, os.fdopen(destfile, 'wb'))
         
         if upfile.done == -1:
             self.send_error(408, 'Upload interrupted')
@@ -209,8 +222,8 @@ class FileServHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
         # Redirect any request to the filename of the file to serve.
         # This hands over the filename to the client.
         
-        self.path = urllib.parse.quote(urllib.parse.unquote(self.path))
-        location = '/' + urllib.parse.quote(os.path.basename(self.filename))
+        self.path = quote(unquote(self.path))
+        location = '/' + quote(os.path.basename(self.filename))
         if os.path.isdir(self.filename):
             location += get_archive_ext(compressed)
         
@@ -247,15 +260,15 @@ class FileServHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             
             if not ftype:
                 print('Can only serve files or directories. Aborting.',
-                      file=sys.stderr)
-                sys.exit(1)
+                      file=os.sys.stderr)
+                os.sys.exit(1)
             
             self.send_response(200)
             self.send_header('Content-Type',
                              'application/octet-stream')
             self.send_header('Content-Disposition',
                              'attachment;filename=%s' %
-                             urllib.parse.quote(os.path.basename(
+                             quote(os.path.basename(
                                  self.filename + self.archive_ext)))
             if os.path.isfile(self.filename):
                 self.send_header('Content-Length',
@@ -265,7 +278,7 @@ class FileServHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             try:
                 if ftype == 'file':
                     datafile = open(self.filename, 'rb')
-                    shutil.copyfileobj(datafile, self.wfile)
+                    copyfileobj(datafile, self.wfile)
                     datafile.close()
                 elif ftype == 'dir':
                     if compressed == 'zip':
@@ -289,7 +302,7 @@ class FileServHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
             
             except Exception as e:
                 print(e)
-                print('Connection broke. Aborting', file=sys.stderr)
+                print('Connection broke. Aborting', file=os.sys.stderr)
     pass
 
 def serve_files(filename:str, maxdown:int=1, ip_addr:str='', port:int=8080):
@@ -312,8 +325,8 @@ def serve_files(filename:str, maxdown:int=1, ip_addr:str='', port:int=8080):
         httpd = ForkingHTTPServer((ip_addr, port), FileServHTTPRequestHandler)
     except socket.error:
         print("Cannot bind to IP address '{ip_addr}' port {port}",
-              file=sys.stderr)
-        sys.exit(1)
+              file=os.sys.stderr)
+        os.sys.exit(1)
     
     if not ip_addr:
         ip_addr = find_ip()
@@ -321,8 +334,7 @@ def serve_files(filename:str, maxdown:int=1, ip_addr:str='', port:int=8080):
     if ip_addr:
         if filename:
             location = f'http://{ip_addr}:{httpd.server_port}/' +\
-                       urllib.parse.quote(
-                           os.path.basename(filename + archive_ext))
+                       quote(os.path.basename(filename + archive_ext))
         else:
             location = f'http://{ip_addr}:{httpd.server_port}/'
         
@@ -334,7 +346,7 @@ def serve_files(filename:str, maxdown:int=1, ip_addr:str='', port:int=8080):
 
 def usage(defport, defmaxdown, errmsg=None):
     """Prints usage information and an error message if supplied with one and exits the program."""
-    name = os.path.basename(sys.argv[0])
+    name = os.path.basename(os.sys.argv[0])
     print(f'''
     Usage: {name} [-i <ip_addr>] [-p <port>] [-c <count>] <file>
            {name} [-i <ip_addr>] [-p <port>] [-c <count>] [-z|-j|-Z|-u] <dir>
@@ -372,24 +384,24 @@ def usage(defport, defmaxdown, errmsg=None):
         count = 2
         ip = 127.0.0.1
         compressed = gz
-    ''', file=sys.stderr)
+    ''', file=os.sys.stderr)
     
     if errmsg:
-        print(errmsg, file=sys.stderr)
-        print(file=sys.stderr)
-        sys.exit(1)
-    sys.exit(0)
+        print(errmsg, file=os.sys.stderr)
+        print(file=os.sys.stderr)
+        os.sys.exit(1)
+    os.sys.exit(0)
     pass
 
 def woof_client(url):
     """Super simple web client that saves the returned data from a url to a file you select"""
-    urlparts = urllib.parse.urlparse(url, 'http')
+    urlparts = urlparse(url, 'http')
     if not urlparts[0] in ('http', 'https') or urlparts[1] == '':
         return None
     
     fname = None
     
-    f = urllib.request.urlopen(url)
+    f = urlopen(url)
     
     f_meta = f.info()
     disp = f_meta['Content-Disposition']
@@ -406,15 +418,14 @@ def woof_client(url):
     
     if fname == None:
         url = f.geturl()
-        urlparts = urllib.parse.urlparse(url)
+        urlparts = urlparse(url)
         fname = urlparts[2]
     
     if not fname:
         fname = 'woof-out.bin'
     
     if fname:
-        fname = urllib.parse.unquote(fname)
-        fname = os.path.basename(fname)
+        fname = os.path.basename(unquote(fname))
     
     readline.set_startup_hook(lambda: readline.insert_text(fname))
     fname = input('Enter target filename: ')
@@ -428,7 +439,7 @@ def woof_client(url):
         destfile = os.open(destfilename,
                            os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
     except OSError as e:
-        if e.errno == errno.EEXIST:
+        if e.errno == EEXIST:
             override = input('File exists. Overwrite (y/n)? ')
             override = override.lower() in ('y', 'yes')
         else:
@@ -438,7 +449,7 @@ def woof_client(url):
         if override:
             destfile = os.open(destfilename, os.O_WRONLY | os.O_CREAT, 0o644)
         else:
-            for suffix in ('.1', '.2', '.3', '.4', '.5', '.6', '.7', '.8', '.9'):
+            for suffix in suffixGen():
                 destfilename = os.path.join('.', fname + suffix)
                 try:
                     destfile = os.open(destfilename,
@@ -446,18 +457,17 @@ def woof_client(url):
                                        0o644)
                     break
                 except OSError as e:
-                    if e.errno == errno.EEXIST:
+                    if e.errno == EEXIST:
                         continue
                     raise
             
             if not destfile:
-                destfile, destfilename = tempfile.mkstemp(prefix=fname+'.',
-                                                          dir='.')
+                destfile, destfilename = mkstemp(prefix=fname+'.', dir='.')
             print(f'Alternate filename is: {destfilename}')
 
     print(f'Downloading file {fname} and saving in current directory as {destfilename}')
     
-    shutil.copyfileobj(f, os.fdopen(destfile, 'wb'))
+    copyfileobj(f, os.fdopen(destfile, 'wb'))
     
     return True
 
@@ -469,7 +479,7 @@ def main():
     port = 8080
     ip_addr = ''
     
-    config = configparser.ConfigParser()
+    config = ConfigParser()
     config.read(('/etc/woofrc', os.path.expanduser('~/.woofrc')))
     
     if config.has_option('main', 'port'):
@@ -496,7 +506,7 @@ def main():
     defaultmaxdown = maxdown
     
     try:
-        options, filenames = getopt.getopt(sys.argv[1:], 'hUszjZui:c:p:')
+        options, filenames = getopt.getopt(os.sys.argv[1:], 'hUszjZui:c:p:')
     except getopt.GetoptError as desc:
         usage(defaultport, defaultmaxdown, desc)
     
@@ -550,7 +560,7 @@ def main():
     else:
         if len(filenames) == 1:
             if woof_client(filenames[0]) != None:
-                sys.exit(0)
+                os.sys.exit(0)
             
             filename = os.path.abspath(filenames[0])
         else:
